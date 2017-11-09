@@ -29,11 +29,11 @@ export function download(bin:ArrayBuffer, name:string = 'test.wasm') {
     document.body.removeChild(a);
 }
 
-export function load(moduleSource:ArrayBuffer) {
+export function load(moduleSource:ArrayBuffer, importsObject:Object = null) {
     // Until TypeScript gains support for WASM, or I figure out
     // how to use declaration files...
     const wasm = (<any> window).WebAssembly;
     const m = new wasm.Module(moduleSource);
-    const i = new wasm.Instance(m);
+    const i = new wasm.Instance(m, importsObject);
     return i;
 }

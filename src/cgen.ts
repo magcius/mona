@@ -34,6 +34,9 @@ function binexpr(scope:scope, b:bodywriter, m:ast.binexpr) {
     expr(scope, b, m.rhs);
     switch (m.op) {
     case '<': return b.i32_lt_u();
+    case '>': return b.i32_gt_u();
+    case '<=': return b.i32_le_u();
+    case '>=': return b.i32_ge_u();
     case '+': return b.i32_add();
     case '-': return b.i32_sub();
     }
@@ -95,27 +98,43 @@ function stmt(scope:scope, b:bodywriter, m:ast.stmt) {
     }
 }
 
-interface gparam { name:string, type:valtype };
+type gtype = valtype | 'void';
+interface gparam { name:string, type:gtype };
 
 function assert(b:boolean) { if (!b) throw new Error('fail') }
 
 function param(m:ast.param):gparam {
-    assert(m.type === 'int');
-    return { name: m.name, type: valtype.i32 };
+    if (m.type === 'void')
+        return { name: m.name, type: 'void' };
+    else if (m.type === 'int')
+        return { name: m.name, type: valtype.i32 };
+    else
+        throw new Error("XXX");
 }
 
-interface gfunc { name:string; ret:gparam; params:gparam[]; body:bodywriter; exported:boolean }
+interface gfunctype { name:string; ret:gparam; params:gparam[]; }
+interface gfuncimport { kind:'import'; type:gfunctype; }
+interface gfuncimpl { kind:'impl'; type:gfunctype; exported:boolean; body:bodywriter; }
+type gfunc = gfuncimport | gfuncimpl;
 
 function func(pscope:scope, m:ast.func):gfunc {
     const name = m.name;
     const params = m.params.map(param);
     const ret = param(m.ret);
-    const body = new bodywriter(params.length);
-    const scope = pscope.sub();
-    params.forEach((p, i) => scope.names.set(p.name, { k:'loc', idx: i }));
-    stmt(scope, body, m.body);
-    const exported = m.exported;
-    return { name, params, ret, body, exported };
+    const type = { name, params, ret };
+
+    const flags = m.flags;
+    let body = null;
+    if ((flags & ast.funcflags.imported)) {
+        return { type, kind: 'import' };
+    } else {
+        body = new bodywriter(params.length);
+        const scope = pscope.sub();
+        params.forEach((p, i) => scope.names.set(p.name, { k:'loc', idx: i }));
+        stmt(scope, body, m.body);
+        const exported = !!(flags & ast.funcflags.exported);
+        return { type, kind: 'impl', exported, body };
+    }
 }
 
 interface gmod { functions:gfunc[]; }
@@ -123,6 +142,11 @@ interface gmod { functions:gfunc[]; }
 function module(m:ast.module):gmod {
     // global scope. define all functions.
     const g = new scope();
+
+    // Assign indexes. Imports go first, according to the spec!
+    m.functions.sort((a, b) => {
+        return (b.flags & ast.funcflags.imported) - (a.flags & ast.funcflags.imported);
+    });
     m.functions.forEach((af, i) => g.names.set(af.name, { k:'func', idx: i }));
 
     const functions = m.functions.map((f) => {
@@ -139,6 +163,9 @@ function cm(m:gmod):ArrayBuffer {
     w.uint32(0x01);
 
     const functions = m.functions;
+    const functypes = functions.map((cf) => cf.type);
+    const funcimpls:gfuncimpl[] = (<gfuncimpl[]> functions.filter((cf) => cf.kind === 'impl'));
+    const funcimports:gfuncimport[] = (<gfuncimport[]> functions.filter((cf) => cf.kind === 'import'));
 
     function sect(id:number, buf:ArrayBuffer) {
         w.varuint7(id);
@@ -148,19 +175,38 @@ function cm(m:gmod):ArrayBuffer {
 
     function sect_types():ArrayBuffer {
         const w = new wasmwriter();
-        w.varuint32(functions.length);
+        w.varuint32(functypes.length);
 
-        function writeParamList(pl:gparam[]) {
+        function plist(pl_:gparam[]) {
+            const pl = pl_.filter((p) => p.type !== 'void');
             w.varuint32(pl.length);
-            for (const p of pl)
+            for (const p of pl) {
+                if (p.type === 'void')
+                    throw new Error();
                 w.uint8(p.type);
+            }
         }
 
-        for (const cf of functions) {
+        for (const t of functypes) {
             w.uint8(0x60);  // form = "func"
-            writeParamList(cf.params);
-            const retparams = [cf.ret];
-            writeParamList(retparams);
+            plist(t.params);
+            const retparams = [t.ret];
+            plist(retparams);
+        }
+
+        return w.finish();
+    }
+
+    function sect_imports():ArrayBuffer {
+        const w = new wasmwriter();
+
+        w.varuint32(funcimports.length);
+
+        for (const cf of funcimports) {
+            w.pstr('imports'); // XXX: specify module name
+            w.pstr(cf.type.name);
+            w.uint8(0x00); // import function
+            w.varuint32(functypes.indexOf(cf.type)); // type
         }
 
         return w.finish();
@@ -168,33 +214,33 @@ function cm(m:gmod):ArrayBuffer {
 
     function sect_functions():ArrayBuffer {
         const w = new wasmwriter();
-        w.varuint32(functions.length);
-        // We have a 1:1 mapping of types and functions rn. Just write the function/type idx.
-        functions.forEach((cf, i) => w.varuint32(i));
+        w.varuint32(funcimpls.length);
+        for (const cf of funcimpls) {
+            w.varuint32(functypes.indexOf(cf.type)); // type
+        }
         return w.finish();
     }
 
     function sect_exports():ArrayBuffer {
         const w = new wasmwriter();
 
-        const exportable = functions.filter((cf) => cf.exported);
+        const exportable = funcimpls.filter((cf) => cf.exported);
         w.varuint32(exportable.length);
 
-        functions.forEach((cf, i) => {
-            if (!cf.exported) return;
-            w.pstr(cf.name);
-            w.uint8(0x00); // external_kind
-            w.varuint32(i);
-        });
+        for (const cf of exportable) {
+            w.pstr(cf.type.name);
+            w.uint8(0x00); // function
+            w.varuint32(functions.indexOf(cf)); // funcidx
+        }
 
         return w.finish();
     }
 
     function sect_code():ArrayBuffer {
         const w = new wasmwriter();
-        w.varuint32(functions.length);
+        w.varuint32(funcimpls.length);
 
-        for (const cf of functions) {
+        for (const cf of funcimpls) {
             const buf = cf.body.finish();
             w.varuint32(buf.byteLength);
             w.copy_buf(buf);
@@ -204,6 +250,7 @@ function cm(m:gmod):ArrayBuffer {
     }
 
     sect(0x01, sect_types());
+    sect(0x02, sect_imports());
     sect(0x03, sect_functions());
     sect(0x07, sect_exports());
     sect(0x0A, sect_code());

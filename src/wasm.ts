@@ -148,6 +148,9 @@ export class bodywriter {
 
     // Comparison operators.
     i32_lt_u()           { this.$u00(0x49); }
+    i32_gt_u()           { this.$u00(0x4B); }
+    i32_le_u()           { this.$u00(0x4D); }
+    i32_ge_u()           { this.$u00(0x4F); }
 
     // Numeric operators.
     i32_add()            { this.$u00(0x6a); }

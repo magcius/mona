@@ -1,8 +1,7 @@
 // lexer / parser
-System.register("lang", [], function(exports_1, context_1) {
+System.register("lang", [], function (exports_1, context_1) {
     "use strict";
     var __moduleName = context_1 && context_1.id;
-    var ast;
     function construct_tokens(m) {
         const o = {}, p = [];
         for (const t of m) {
@@ -51,8 +50,8 @@ System.register("lang", [], function(exports_1, context_1) {
             }
             return { kind: 'string', s: b };
         }
-        const basic_tokens = construct_tokens(['=', '+', '-', '==', '<', '(', ')', '{', '}', ',', ';']);
-        const keywords = ['function', 'if', 'export', 'return'];
+        const basic_tokens = construct_tokens(['=', '+', '-', '==', '<', '>', '<=', '>=', '(', ')', '{', '}', ',', ';']);
+        const keywords = ['function', 'if', 'import', 'export', 'return'];
         function identifier() {
             let b = '';
             do {
@@ -149,7 +148,7 @@ System.register("lang", [], function(exports_1, context_1) {
         }
         function pbincomp() {
             let lhs = pbinop();
-            while (['<'].indexOf(h().kind) >= 0) {
+            while (['<', '<=', '>', '>='].indexOf(h().kind) >= 0) {
                 const op = n().kind;
                 const rhs = pbinop();
                 lhs = { k: 'bin', op, lhs, rhs };
@@ -211,8 +210,16 @@ System.register("lang", [], function(exports_1, context_1) {
             const name = ei();
             const params = ppspec();
             const exported = m('export');
-            const body = pblock();
-            return { name, ret, params, body, exported };
+            const imported = m('import');
+            let body = null;
+            if (imported)
+                e(';');
+            else
+                body = pblock();
+            const flags = (0) |
+                (imported ? ast.funcflags.imported : 0) |
+                (exported ? ast.funcflags.exported : 0);
+            return { name, ret, params, body, flags };
         }
         function ptop() {
             const functions = [];
@@ -234,9 +241,11 @@ System.register("lang", [], function(exports_1, context_1) {
         return p;
     }
     exports_1("parse", parse);
+    var ast;
     return {
-        setters:[],
-        execute: function() {
+        setters: [],
+        execute: function () {
+            // lexer / parser
             // ast
             (function (ast) {
                 ;
@@ -245,19 +254,27 @@ System.register("lang", [], function(exports_1, context_1) {
                 ;
                 ;
                 ;
-            })(ast = ast || (ast = {}));
+                let funcflags;
+                (function (funcflags) {
+                    funcflags[funcflags["imported"] = 1] = "imported";
+                    funcflags[funcflags["exported"] = 2] = "exported";
+                })(funcflags = ast.funcflags || (ast.funcflags = {}));
+                ;
+                ;
+            })(ast || (ast = {}));
             exports_1("ast", ast);
         }
-    }
+    };
 });
 // wasm binary encoding
-System.register("wasm", [], function(exports_2, context_2) {
+System.register("wasm", [], function (exports_2, context_2) {
     "use strict";
     var __moduleName = context_2 && context_2.id;
     var valtype, blktype, wasmwriter, bodywriter;
     return {
-        setters:[],
-        execute: function() {
+        setters: [],
+        execute: function () {
+            // wasm binary encoding
             (function (valtype) {
                 valtype[valtype["i32"] = 127] = "i32";
             })(valtype || (valtype = {}));
@@ -382,25 +399,29 @@ System.register("wasm", [], function(exports_2, context_2) {
                 i32_const(v) { this.$s32(0x41, v); }
                 // Comparison operators.
                 i32_lt_u() { this.$u00(0x49); }
+                i32_gt_u() { this.$u00(0x4B); }
+                i32_le_u() { this.$u00(0x4D); }
+                i32_ge_u() { this.$u00(0x4F); }
                 // Numeric operators.
                 i32_add() { this.$u00(0x6a); }
                 i32_sub() { this.$u00(0x6b); }
             };
             exports_2("bodywriter", bodywriter);
         }
-    }
+    };
 });
 // code generator
-System.register("cgen", ["wasm"], function(exports_3, context_3) {
+System.register("cgen", ["lang", "wasm"], function (exports_3, context_3) {
     "use strict";
     var __moduleName = context_3 && context_3.id;
-    var wasm_1;
-    var scope;
     function binexpr(scope, b, m) {
         expr(scope, b, m.lhs);
         expr(scope, b, m.rhs);
         switch (m.op) {
             case '<': return b.i32_lt_u();
+            case '>': return b.i32_gt_u();
+            case '<=': return b.i32_le_u();
+            case '>=': return b.i32_ge_u();
             case '+': return b.i32_add();
             case '-': return b.i32_sub();
         }
@@ -460,23 +481,39 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
     function assert(b) { if (!b)
         throw new Error('fail'); }
     function param(m) {
-        assert(m.type === 'int');
-        return { name: m.name, type: wasm_1.valtype.i32 };
+        if (m.type === 'void')
+            return { name: m.name, type: 'void' };
+        else if (m.type === 'int')
+            return { name: m.name, type: wasm_1.valtype.i32 };
+        else
+            throw new Error("XXX");
     }
     function func(pscope, m) {
         const name = m.name;
         const params = m.params.map(param);
         const ret = param(m.ret);
-        const body = new wasm_1.bodywriter(params.length);
-        const scope = pscope.sub();
-        params.forEach((p, i) => scope.names.set(p.name, { k: 'loc', idx: i }));
-        stmt(scope, body, m.body);
-        const exported = m.exported;
-        return { name, params, ret, body, exported };
+        const type = { name, params, ret };
+        const flags = m.flags;
+        let body = null;
+        if ((flags & lang_1.ast.funcflags.imported)) {
+            return { type, kind: 'import' };
+        }
+        else {
+            body = new wasm_1.bodywriter(params.length);
+            const scope = pscope.sub();
+            params.forEach((p, i) => scope.names.set(p.name, { k: 'loc', idx: i }));
+            stmt(scope, body, m.body);
+            const exported = !!(flags & lang_1.ast.funcflags.exported);
+            return { type, kind: 'impl', exported, body };
+        }
     }
     function module(m) {
         // global scope. define all functions.
         const g = new scope();
+        // Assign indexes. Imports go first, according to the spec!
+        m.functions.sort((a, b) => {
+            return (b.flags & lang_1.ast.funcflags.imported) - (a.flags & lang_1.ast.funcflags.imported);
+        });
         m.functions.forEach((af, i) => g.names.set(af.name, { k: 'func', idx: i }));
         const functions = m.functions.map((f) => {
             return func(g, f);
@@ -489,6 +526,9 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
         w.str('\0asm');
         w.uint32(0x01);
         const functions = m.functions;
+        const functypes = functions.map((cf) => cf.type);
+        const funcimpls = functions.filter((cf) => cf.kind === 'impl');
+        const funcimports = functions.filter((cf) => cf.kind === 'import');
         function sect(id, buf) {
             w.varuint7(id);
             w.varuint32(buf.byteLength);
@@ -496,44 +536,58 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
         }
         function sect_types() {
             const w = new wasm_1.wasmwriter();
-            w.varuint32(functions.length);
-            function writeParamList(pl) {
+            w.varuint32(functypes.length);
+            function plist(pl_) {
+                const pl = pl_.filter((p) => p.type !== 'void');
                 w.varuint32(pl.length);
-                for (const p of pl)
+                for (const p of pl) {
+                    if (p.type === 'void')
+                        throw new Error();
                     w.uint8(p.type);
+                }
             }
-            for (const cf of functions) {
+            for (const t of functypes) {
                 w.uint8(0x60); // form = "func"
-                writeParamList(cf.params);
-                const retparams = [cf.ret];
-                writeParamList(retparams);
+                plist(t.params);
+                const retparams = [t.ret];
+                plist(retparams);
+            }
+            return w.finish();
+        }
+        function sect_imports() {
+            const w = new wasm_1.wasmwriter();
+            w.varuint32(funcimports.length);
+            for (const cf of funcimports) {
+                w.pstr('imports'); // XXX: specify module name
+                w.pstr(cf.type.name);
+                w.uint8(0x00); // import function
+                w.varuint32(functypes.indexOf(cf.type)); // type
             }
             return w.finish();
         }
         function sect_functions() {
             const w = new wasm_1.wasmwriter();
-            w.varuint32(functions.length);
-            // We have a 1:1 mapping of types and functions rn. Just write the function/type idx.
-            functions.forEach((cf, i) => w.varuint32(i));
+            w.varuint32(funcimpls.length);
+            for (const cf of funcimpls) {
+                w.varuint32(functypes.indexOf(cf.type)); // type
+            }
             return w.finish();
         }
         function sect_exports() {
             const w = new wasm_1.wasmwriter();
-            const exportable = functions.filter((cf) => cf.exported);
+            const exportable = funcimpls.filter((cf) => cf.exported);
             w.varuint32(exportable.length);
-            functions.forEach((cf, i) => {
-                if (!cf.exported)
-                    return;
-                w.pstr(cf.name);
-                w.uint8(0x00); // external_kind
-                w.varuint32(i);
-            });
+            for (const cf of exportable) {
+                w.pstr(cf.type.name);
+                w.uint8(0x00); // function
+                w.varuint32(functions.indexOf(cf)); // funcidx
+            }
             return w.finish();
         }
         function sect_code() {
             const w = new wasm_1.wasmwriter();
-            w.varuint32(functions.length);
-            for (const cf of functions) {
+            w.varuint32(funcimpls.length);
+            for (const cf of funcimpls) {
                 const buf = cf.body.finish();
                 w.varuint32(buf.byteLength);
                 w.copy_buf(buf);
@@ -541,6 +595,7 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
             return w.finish();
         }
         sect(0x01, sect_types());
+        sect(0x02, sect_imports());
         sect(0x03, sect_functions());
         sect(0x07, sect_exports());
         sect(0x0A, sect_code());
@@ -550,12 +605,18 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
         return cm(module(m));
     }
     exports_3("compile", compile);
+    var lang_1, wasm_1, scope;
     return {
-        setters:[
+        setters: [
+            function (lang_1_1) {
+                lang_1 = lang_1_1;
+            },
             function (wasm_1_1) {
                 wasm_1 = wasm_1_1;
-            }],
-        execute: function() {
+            }
+        ],
+        execute: function () {
+            // code generator
             ;
             ;
             scope = class scope {
@@ -578,10 +639,10 @@ System.register("cgen", ["wasm"], function(exports_3, context_3) {
             };
             ;
         }
-    }
+    };
 });
 // debugging junk
-System.register("util", [], function(exports_4, context_4) {
+System.register("util", [], function (exports_4, context_4) {
     "use strict";
     var __moduleName = context_4 && context_4.id;
     function hexdump(b) {
@@ -611,51 +672,57 @@ System.register("util", [], function(exports_4, context_4) {
         document.body.removeChild(a);
     }
     exports_4("download", download);
-    function load(moduleSource) {
+    function load(moduleSource, importsObject = null) {
         // Until TypeScript gains support for WASM, or I figure out
         // how to use declaration files...
         const wasm = window.WebAssembly;
         const m = new wasm.Module(moduleSource);
-        const i = new wasm.Instance(m);
+        const i = new wasm.Instance(m, importsObject);
         return i;
     }
     exports_4("load", load);
     return {
-        setters:[],
-        execute: function() {
+        setters: [],
+        execute: function () {
+            // debugging junk
         }
-    }
+    };
 });
-System.register("main", ["lang", "cgen", "util"], function(exports_5, context_5) {
+System.register("main", ["lang", "cgen", "util"], function (exports_5, context_5) {
     "use strict";
     var __moduleName = context_5 && context_5.id;
-    var lang_1, cgen_1, util_1;
+    var lang_2, cgen_1, util_1;
     return {
-        setters:[
-            function (lang_1_1) {
-                lang_1 = lang_1_1;
+        setters: [
+            function (lang_2_1) {
+                lang_2 = lang_2_1;
             },
             function (cgen_1_1) {
                 cgen_1 = cgen_1_1;
             },
             function (util_1_1) {
                 util_1 = util_1_1;
-            }],
-        execute: function() {
+            }
+        ],
+        execute: function () {
             window.onload = function () {
                 const source = `
+function void print(int n) import;
+
 function int fib(int n) export {
     if (n < 2)
         return n;
+    print(n);
     return fib(n - 2) + fib(n - 1);
 }
 `;
-                const m = lang_1.parse(source);
+                const m = lang_2.parse(source);
                 const w = cgen_1.compile(m);
-                const i = util_1.load(w);
+                const importsObject = { imports: { print: function (n) { console.log(n); } } };
+                const i = util_1.load(w, importsObject);
                 console.log(i.exports.fib(10));
             };
         }
-    }
+    };
 });
 //# sourceMappingURL=main.js.map

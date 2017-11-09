@@ -57,8 +57,8 @@ function* lexer(s:string) {
         return { kind: 'string', s: b };
     }
 
-    const basic_tokens = construct_tokens(['=', '+', '-', '==', '<', '(', ')', '{', '}', ',', ';']);
-    const keywords = ['function', 'if', 'export', 'return'];
+    const basic_tokens = construct_tokens(['=', '+', '-', '==', '<', '>', '<=', '>=', '(', ')', '{', '}', ',', ';']);
+    const keywords = ['function', 'if', 'import', 'export', 'return'];
 
     function identifier():token {
         let b = '';
@@ -121,7 +121,8 @@ export namespace ast {
     export interface sexprstmt { k:'expr', expr:expr }
     export type stmt = sif | sret | sblock | sexprstmt;
     export interface param { type:string; name:string }
-    export interface func { name:string; params:param[]; ret:param; body:sblock, exported:boolean }
+    export enum funcflags { imported = 0x01, exported = 0x02 };
+    export interface func { name:string; params:param[]; ret:param; body:sblock, flags:funcflags };
     export interface module { functions:func[] }
 }
 
@@ -180,7 +181,7 @@ function parser(s):ast.module {
 
     function pbincomp():ast.expr {
         let lhs = pbinop();
-        while (['<'].indexOf(h().kind) >= 0) {
+        while (['<', '<=', '>', '>='].indexOf(h().kind) >= 0) {
             const op = n().kind;
             const rhs = pbinop();
             lhs = { k:'bin', op, lhs, rhs };
@@ -249,8 +250,18 @@ function parser(s):ast.module {
         const name = ei();
         const params = ppspec();
         const exported = m('export');
-        const body = pblock();
-        return { name, ret, params, body, exported };
+        const imported = m('import');
+        let body = null;
+
+        if (imported)
+            e(';');
+        else
+            body = pblock();
+
+        const flags = (0) |
+            (imported ? ast.funcflags.imported : 0) |
+            (exported ? ast.funcflags.exported : 0);
+        return { name, ret, params, body, flags };
     }
 
     function ptop():ast.module {
